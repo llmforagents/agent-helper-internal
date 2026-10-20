@@ -8,6 +8,7 @@ import {
   API_KEY_ENV_VAR, ApiKey, BaseUrl, DEFAULT_BASE_URL, Err, Ok, TIERS, TIER_MODEL, TOOLS, assertNever, redactKey,
   type GatewayConfig, type Result, type Tool, type ToolStatus,
 } from './domain.js'
+import { applyShellRc, keyEnvContent, keyEnvFile, rcFileFor } from './shell.js'
 import { fetchTiers, type FetchFn, type GatewayError } from './gateway.js'
 
 const EnvSchema = z.object({
@@ -15,6 +16,7 @@ const EnvSchema = z.object({
   LLM_PROXY_BASE_URL: z.string().optional(),
   CLAUDE_CONFIG_DIR: z.string().optional(),
   CODEX_HOME: z.string().optional(),
+  SHELL: z.string().optional(),
 })
 
 export type Env = z.infer<typeof EnvSchema>
@@ -29,6 +31,9 @@ export type Deps = Readonly<{
   env: Env
   home: string
   now: () => Date
+  /** True when stdin/stdout are a TTY, so asking questions is possible. */
+  interactive: boolean
+  prompt: (question: string, opts: Readonly<{ hidden: boolean }>) => Promise<string>
   out: (line: string) => void
   err: (line: string) => void
 }>
@@ -36,13 +41,14 @@ export type Deps = Readonly<{
 const USAGE = `agent-helper-internal — point Claude Code and Codex at the llm-proxy gateway
 
 Usage:
-  agent-helper-internal apply <claude|codex|all> [--api-key K] [--base-url U] [--default] [--dry-run] [--no-verify]
+  agent-helper-internal apply <claude|codex|all> [--api-key K] [--base-url U] [--default] [--persist-key] [--dry-run] [--no-verify]
   agent-helper-internal status [--api-key K] [--base-url U]
   agent-helper-internal restore <claude|codex> [--snapshot NAME]
   agent-helper-internal models [--api-key K] [--base-url U]
 
 Tiers: auto/high (opus), auto/normal (sonnet), auto/fast (haiku).
-Key: --api-key or $${API_KEY_ENV_VAR}. Base URL: --base-url or $LLM_PROXY_BASE_URL (default ${DEFAULT_BASE_URL}).
+Key: --api-key or $${API_KEY_ENV_VAR}; if neither is set and this is a terminal, you are asked for it (hidden input). Base URL: --base-url or $LLM_PROXY_BASE_URL (default ${DEFAULT_BASE_URL}).
+--persist-key (codex): store the key in a 0600 file and source it from your shell rc, so Codex finds $${API_KEY_ENV_VAR}; asked interactively when omitted.
 --default (codex only): also set model_provider/model (auto/normal) as the Codex default; otherwise run \`codex -p ${profileName('high')}|${profileName('normal')}|${profileName('fast')}\`.`
 
 const OPTIONS = {
@@ -52,6 +58,7 @@ const OPTIONS = {
   default: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   'no-verify': { type: 'boolean' },
+  'persist-key': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -89,11 +96,21 @@ function targetPath(tool: Tool, deps: Deps): string {
   }
 }
 
-function resolveConfig(values: Readonly<{ 'api-key'?: string | undefined; 'base-url'?: string | undefined }>, deps: Deps): GatewayConfig | string {
+async function resolveConfig(
+  values: Readonly<{ 'api-key'?: string | undefined; 'base-url'?: string | undefined }>,
+  deps: Deps,
+  opts: Readonly<{ mayPrompt: boolean }>,
+): Promise<GatewayConfig | string> {
   const base = BaseUrl(values['base-url'] ?? deps.env.LLM_PROXY_BASE_URL ?? DEFAULT_BASE_URL)
   if (!base.ok) return 'invalid --base-url (expected an http(s) URL)'
-  const key = ApiKey(values['api-key'] ?? deps.env.LLM_PROXY_API_KEY ?? '')
-  if (!key.ok) return `missing or invalid API key: pass --api-key or export ${API_KEY_ENV_VAR}`
+  let raw = values['api-key'] ?? deps.env.LLM_PROXY_API_KEY ?? ''
+  // `status` only inspects files; it never needs a real key.
+  if (raw.trim() === '' && !opts.mayPrompt) raw = 'status-placeholder-key'
+  if (raw.trim() === '' && opts.mayPrompt && deps.interactive) {
+    raw = await deps.prompt('LLM proxy API key (input hidden): ', { hidden: true })
+  }
+  const key = ApiKey(raw)
+  if (!key.ok) return `missing or invalid API key: pass --api-key, export ${API_KEY_ENV_VAR}, or run in a terminal to be asked`
   return { baseUrl: base.value, apiKey: key.value }
 }
 
@@ -105,9 +122,9 @@ async function planClaude(cfg: GatewayConfig, deps: Deps): Promise<Planned> {
   return next.ok ? Ok([{ target, content: next.value }]) : Err(`cannot edit ${target}: ${next.error.kind} (${next.error.detail})`)
 }
 
-async function planCodex(cfg: GatewayConfig, makeDefault: boolean, deps: Deps): Promise<Planned> {
+async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: boolean; persistKey: boolean }>, deps: Deps): Promise<Planned> {
   const target = targetPath('codex', deps)
-  const next = applyCodexConfig((await deps.fs.read(target)) ?? '', cfg, { makeDefault })
+  const next = applyCodexConfig((await deps.fs.read(target)) ?? '', cfg, { makeDefault: flags.makeDefault })
   if (!next.ok) return Err(`cannot edit ${target}: ${next.error.kind} (${next.error.detail})`)
   const files: PlannedFile[] = [{ target, content: next.value }]
   for (const tier of TIERS) {
@@ -115,11 +132,29 @@ async function planCodex(cfg: GatewayConfig, makeDefault: boolean, deps: Deps): 
     if (!canWriteProfile(await deps.fs.read(file))) return Err(`${file} exists and was not written by this tool; move it away first`)
     files.push({ target: file, content: profileContent(tier) })
   }
+  if (flags.persistKey) {
+    const envFile = keyEnvFile(deps.home)
+    const rc = rcFileFor(deps.home, deps.env.SHELL)
+    files.push({ target: envFile, content: keyEnvContent(cfg.apiKey) })
+    files.push({ target: rc, content: applyShellRc((await deps.fs.read(rc)) ?? '', envFile) })
+  }
   return Ok(files)
 }
 
-async function applyOne(tool: Tool, cfg: GatewayConfig, flags: Readonly<{ makeDefault: boolean; dryRun: boolean }>, deps: Deps): Promise<boolean> {
-  const planned = tool === 'claude' ? await planClaude(cfg, deps) : await planCodex(cfg, flags.makeDefault, deps)
+type ApplyFlags = Readonly<{ makeDefault: boolean; dryRun: boolean; persistKey: boolean | undefined }>
+
+/** Asks whether to store the key for Codex; only when it was not decided by a flag and a human is present. */
+async function decidePersist(flags: ApplyFlags, deps: Deps): Promise<boolean> {
+  if (flags.persistKey !== undefined) return flags.persistKey
+  if (!deps.interactive || flags.dryRun) return false
+  const rc = rcFileFor(deps.home, deps.env.SHELL)
+  const answer = await deps.prompt(`Codex reads the key from $${API_KEY_ENV_VAR}. Store it in ${keyEnvFile(deps.home)} (0600) and source it from ${rc}? [y/N] `, { hidden: false })
+  return /^y(es)?$/i.test(answer.trim())
+}
+
+async function applyOne(tool: Tool, cfg: GatewayConfig, flags: ApplyFlags, deps: Deps): Promise<boolean> {
+  const persistKey = tool === 'codex' && await decidePersist(flags, deps)
+  const planned = tool === 'claude' ? await planClaude(cfg, deps) : await planCodex(cfg, { makeDefault: flags.makeDefault, persistKey }, deps)
   if (!planned.ok) {
     deps.err(`${tool}: ${planned.error}`)
     return false
@@ -140,7 +175,9 @@ async function applyOne(tool: Tool, cfg: GatewayConfig, flags: Readonly<{ makeDe
   const snapshot = await writeWithBackup(deps.fs, { home: deps.home, tool, files: changed, now: deps.now() })
   deps.out(`${tool}: updated ${names} (backup ${snapshot})`)
   if (tool === 'codex') {
-    deps.out(`  export ${API_KEY_ENV_VAR}=<your key>   # Codex reads the key from the environment`)
+    deps.out(persistKey
+      ? '  key stored; open a new shell (or `source` your rc file) so Codex sees it'
+      : `  export ${API_KEY_ENV_VAR}=<your key>   # Codex reads the key from the environment`)
     deps.out(flags.makeDefault
       ? `  default model: ${TIER_MODEL.normal}; others: codex -p ${profileName('high')} | ${profileName('fast')}`
       : `  run: codex -p ${profileName('high')} | ${profileName('normal')} | ${profileName('fast')}`)
@@ -178,7 +215,7 @@ export async function run(argv: readonly string[], deps: Deps): Promise<number> 
     case 'apply':
     case 'status':
     case 'models': {
-      const cfg = resolveConfig(values, deps)
+      const cfg = await resolveConfig(values, deps, { mayPrompt: command !== 'status' })
       if (typeof cfg === 'string') { deps.err(cfg); return EXIT_USAGE }
       if (command === 'status') return runStatus(cfg, deps)
       if (command === 'models') return runModels(cfg, deps)
@@ -193,7 +230,7 @@ export async function run(argv: readonly string[], deps: Deps): Promise<number> 
       deps.out(`gateway ${cfg.baseUrl}  key ${redactKey(cfg.apiKey)}`)
       let allOk = true
       for (const tool of tools) {
-        const ok = await applyOne(tool, cfg, { makeDefault: values.default === true, dryRun: values['dry-run'] === true }, deps)
+        const ok = await applyOne(tool, cfg, { makeDefault: values.default === true, dryRun: values['dry-run'] === true, persistKey: values['persist-key'] }, deps)
         allOk = allOk && ok
       }
       return allOk ? EXIT_OK : EXIT_FAIL

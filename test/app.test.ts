@@ -7,20 +7,23 @@ const modelsBody = { data: [
   { id: 'auto/high', owned_by: 'a,b' }, { id: 'auto/normal', owned_by: 'c' }, { id: 'auto/fast', owned_by: 'd' },
 ] }
 
-function setup(initial: Record<string, string> = {}, status = 200) {
+function setup(initial: Record<string, string> = {}, status = 200, answers: string[] = [], interactive = false) {
   const fs = memFs(initial)
   const out: string[] = []
   const err: string[] = []
   const calls: string[] = []
+  const asked: { question: string; hidden: boolean }[] = []
   const deps: Deps = {
-    fs, home: '/home/u', env: {}, now: () => new Date('2026-10-20T10:00:00Z'),
+    fs, home: '/home/u', env: { SHELL: '/bin/bash' }, now: () => new Date('2026-10-20T10:00:00Z'),
+    interactive,
+    prompt: async (question, opts) => { asked.push({ question, hidden: opts.hidden }); return answers.shift() ?? '' },
     out: (l) => out.push(l), err: (l) => err.push(l),
     fetch: async (url, init) => {
       calls.push(`${url} ${init.headers['authorization']}`)
       return new Response(JSON.stringify(modelsBody), { status })
     },
   }
-  return { fs, out, err, calls, deps }
+  return { fs, out, err, calls, asked, deps }
 }
 
 describe('run', () => {
@@ -64,7 +67,7 @@ describe('run', () => {
   })
   it('honours CLAUDE_CONFIG_DIR and CODEX_HOME', async () => {
     const s = setup()
-    const deps: Deps = { ...s.deps, env: { CLAUDE_CONFIG_DIR: '/c', CODEX_HOME: '/x' } }
+    const deps: Deps = { ...s.deps, env: { CLAUDE_CONFIG_DIR: '/c', CODEX_HOME: '/x', SHELL: '/bin/bash' } }
     await run(['apply', 'all', '--api-key', KEY, '--no-verify'], deps)
     expect(s.fs.files.has('/c/settings.json')).toBe(true)
     expect(s.fs.files.has('/x/config.toml')).toBe(true)
@@ -89,5 +92,81 @@ describe('run', () => {
     expect(await run(['apply', 'claude'], s.deps)).toBe(2)
     expect(await run(['apply', 'nope', '--api-key', KEY], s.deps)).toBe(2)
     expect(await run([], s.deps)).toBe(2)
+  })
+
+  describe('interactive key', () => {
+    it('asks for the key (hidden) when none is given and uses it', async () => {
+      const s = setup({}, 200, [KEY, 'n'], true)
+      expect(await run(['apply', 'all'], s.deps)).toBe(0)
+      expect(s.asked[0]).toEqual({ question: expect.stringContaining('API key'), hidden: true })
+      expect(s.calls[0]).toContain(`Bearer ${KEY}`)
+      expect(s.fs.files.get('/home/u/.claude/settings.json')).toContain(KEY)
+      expect(s.out.join('\n') + s.err.join('\n')).not.toContain(KEY)
+    })
+    it('does not ask when the key comes from a flag or env', async () => {
+      const s = setup({}, 200, ['n'], true)
+      await run(['apply', 'claude', '--api-key', KEY], s.deps)
+      expect(s.asked).toHaveLength(0)
+    })
+    it('fails cleanly when not interactive and no key', async () => {
+      const s = setup({}, 200, [KEY], false)
+      expect(await run(['apply', 'claude'], s.deps)).toBe(2)
+      expect(s.asked).toHaveLength(0)
+    })
+    it('rejects an empty answer', async () => {
+      const s = setup({}, 200, [''], true)
+      expect(await run(['apply', 'claude'], s.deps)).toBe(2)
+      expect(s.fs.files.size).toBe(0)
+    })
+    it('status never prompts', async () => {
+      const s = setup({}, 200, [KEY], true)
+      expect(await run(['status'], s.deps)).toBe(0)
+      expect(s.asked).toHaveLength(0)
+    })
+  })
+
+  describe('persisting the key for Codex', () => {
+    const ENV = '/home/u/.config/agent-helper-internal/env'
+    it('--persist-key writes a 0600-style env file and sources it from the rc, once', async () => {
+      const s = setup({ '/home/u/.bashrc': '# mine\n' })
+      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
+      expect(s.fs.files.get(ENV)).toBe(`export LLM_PROXY_API_KEY='${KEY}'\n`)
+      const rc = s.fs.files.get('/home/u/.bashrc') ?? ''
+      expect(rc.startsWith('# mine')).toBe(true)
+      expect(rc.match(/agent-helper-internal >>>/g)).toHaveLength(1)
+      expect(rc).not.toContain(KEY)
+      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
+      expect((s.fs.files.get('/home/u/.bashrc') ?? '').match(/agent-helper-internal >>>/g)).toHaveLength(1)
+    })
+    it('asks interactively and honours a "yes"', async () => {
+      const s = setup({}, 200, ['y'], true)
+      await run(['apply', 'codex', '--api-key', KEY], s.deps)
+      expect(s.asked[0]?.hidden).toBe(false)
+      expect(s.fs.files.has(ENV)).toBe(true)
+    })
+    it('does not persist on "no", dry-run, or non-interactive runs', async () => {
+      const no = setup({}, 200, ['n'], true)
+      await run(['apply', 'codex', '--api-key', KEY], no.deps)
+      expect(no.fs.files.has(ENV)).toBe(false)
+      const dry = setup({}, 200, [], true)
+      await run(['apply', 'codex', '--api-key', KEY, '--dry-run'], dry.deps)
+      expect(dry.asked).toHaveLength(0)
+      const batch = setup()
+      await run(['apply', 'codex', '--api-key', KEY], batch.deps)
+      expect(batch.fs.files.has(ENV)).toBe(false)
+    })
+    it('restore removes the env file and the rc block', async () => {
+      const s = setup({ '/home/u/.bashrc': '# mine\n' })
+      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
+      await run(['restore', 'codex'], s.deps)
+      expect(s.fs.files.has(ENV)).toBe(false)
+      expect(s.fs.files.get('/home/u/.bashrc')).toBe('# mine\n')
+    })
+    it('uses .zshrc for zsh', async () => {
+      const s = setup()
+      const deps: Deps = { ...s.deps, env: { SHELL: '/usr/bin/zsh' } }
+      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], deps)
+      expect(s.fs.files.has('/home/u/.zshrc')).toBe(true)
+    })
   })
 })
