@@ -1,0 +1,38 @@
+{
+  "name": "@llmforagents/agent-helper-internal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Internal helper: points Claude Code and Codex at the llm-proxy gateway with auto/high|normal|fast tiers",
+  "type": "module",
+  "bin": {
+    "agent-helper-internal": "./bin/agent-helper-internal.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "jsonc-parser": "^3.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.2.4",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.0"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/llmforagents/agent-helper-internal.git"
+  }
+}
