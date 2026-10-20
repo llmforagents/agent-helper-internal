@@ -5,7 +5,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "bin": {
-    "agent-helper-internal": "./bin/agent-helper-internal.js"
+    "agent-helper-internal": "bin/agent-helper-internal.js"
   },
   "engines": {
     "node": ">=20.0.0"
