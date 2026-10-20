@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Interactive release for agent-helper-internal: check -> pack -> GitHub Release with the tarball attached.
+# Interactive release for agent-helper-internal: check -> pack -> npm publish -> GitHub Release with the tarball attached.
 # Usage: ./scripts/release.sh [check|pack|publish|all]   (default: all)
-# Needs `gh` authenticated with write access to the repo (gh auth login, or GH_TOKEN).
+# Needs `gh` authenticated with write access to the repo (gh auth login, or GH_TOKEN) and NPM_TOKEN in the environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,12 +30,17 @@ publish() {
   phase Publish
   [ -z "$(git status --porcelain)" ] || { echo "working tree is dirty; commit first" >&2; exit 1; }
   git rev-parse "v${VERSION}" >/dev/null 2>&1 && { echo "tag v${VERSION} already exists; bump the version" >&2; exit 1; }
-  read -r -p "Create release v${VERSION} on ${REPO}? [y/N] " ans
+  read -r -p "Publish v${VERSION} to npm and create the GitHub release on ${REPO}? [y/N] " ans
   [ "$ans" = "y" ] || { echo "aborted" >&2; exit 1; }
+  [ -n "${NPM_TOKEN:-}" ] || { echo "NPM_TOKEN is not set" >&2; exit 1; }
+  # Token goes through a throwaway userconfig outside the repo, never into a tracked .npmrc.
+  NPMRC="$(mktemp)"; trap 'rm -f "$NPMRC"' EXIT
+  printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$NPMRC"
+  npm publish "$TARBALL" --access public --userconfig "$NPMRC"
   git tag "v${VERSION}"
   git push origin "v${VERSION}"
   gh release create "v${VERSION}" "$TARBALL" --repo "$REPO" --title "v${VERSION}" \
-    --notes "Install: gh release download v${VERSION} --repo ${REPO} --pattern '*.tgz' -D /tmp/ahi && npm i -g /tmp/ahi/${TARBALL}"
+    --notes "Install: npx @llmforagents/agent-helper-internal@${VERSION} apply all"
 }
 
 case "${1:-all}" in

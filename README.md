@@ -9,24 +9,24 @@ Internal CLI that points **Claude Code** and **Codex** at the llm-proxy gateway
 | `auto/normal` | sonnet (default) | `codex -p llm-normal` |
 | `auto/fast` | haiku | `codex -p llm-fast` |
 
-## Install (private GitHub Release)
+## Quick start (npx)
 
 ```bash
-gh auth login   # once, with an account that can read this repo
-gh release download --repo llmforagents/agent-helper-internal --pattern '*.tgz' -D /tmp/ahi --clobber
-npm i -g /tmp/ahi/*.tgz
+export LLM_PROXY_API_KEY=<your key>
+npx @llmforagents/agent-helper-internal apply all
 ```
 
-Requires Node >= 20. Update by running the same two commands again.
+Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.0 ...`.
+Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then use `agent-helper-internal` directly.
 
 ## Use
 
 ```bash
 export LLM_PROXY_API_KEY=<your key>
-agent-helper-internal apply all          # or: claude | codex   (--dry-run to preview, --default for Codex)
-agent-helper-internal status
-agent-helper-internal models             # tiers the gateway serves right now
-agent-helper-internal restore claude     # undo (backups in ~/.config/agent-helper-internal/backups)
+npx @llmforagents/agent-helper-internal apply all          # or: claude | codex   (--dry-run to preview, --default for Codex)
+npx @llmforagents/agent-helper-internal status
+npx @llmforagents/agent-helper-internal models             # tiers the gateway serves right now
+npx @llmforagents/agent-helper-internal restore claude     # undo (backups in ~/.config/agent-helper-internal/backups)
 ```
 
 Codex reads the key from `$LLM_PROXY_API_KEY` at runtime; it is never written to its config.
@@ -36,5 +36,5 @@ Options: `--base-url`, `--api-key`, `--no-verify`. Honors `CLAUDE_CONFIG_DIR` an
 ## Release (maintainers)
 
 ```bash
-./scripts/release.sh all   # check, npm pack, tag, GitHub Release with the .tgz attached
+NPM_TOKEN=<token> ./scripts/release.sh all   # check, pack, npm publish, tag, GitHub Release with the .tgz attached
 ```
