@@ -132,7 +132,8 @@ describe('run', () => {
       await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
       expect(s.fs.files.get(ENV)).toBe(`export LLM_PROXY_API_KEY='${KEY}'\n`)
       const rc = s.fs.files.get('/home/u/.bashrc') ?? ''
-      expect(rc.startsWith('# mine')).toBe(true)
+      expect(rc.startsWith('# >>> agent-helper-internal >>>')).toBe(true)
+      expect(rc.trimEnd().endsWith('# mine')).toBe(true)
       expect(rc.match(/agent-helper-internal >>>/g)).toHaveLength(1)
       expect(rc).not.toContain(KEY)
       await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
@@ -167,6 +168,60 @@ describe('run', () => {
       const deps: Deps = { ...s.deps, env: { SHELL: '/usr/bin/zsh' } }
       await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], deps)
       expect(s.fs.files.has('/home/u/.zshrc')).toBe(true)
+    })
+  })
+
+  describe('doctor', () => {
+    const responsesBody = { object: 'response', output: [] }
+    function doctorSetup(opts: { shellKey?: string; status?: number; responses?: unknown } = {}) {
+      const s = setup()
+      const deps: Deps = {
+        ...s.deps,
+        env: { SHELL: '/bin/bash', ...(opts.shellKey !== undefined ? { LLM_PROXY_API_KEY: opts.shellKey } : {}) },
+        fetch: async (url, init) => {
+          if ((opts.status ?? 200) !== 200) return new Response('{}', { status: opts.status ?? 200 })
+          if (url.endsWith('/v1/responses')) {
+            expect(init.method).toBe('POST')
+            return new Response(JSON.stringify(opts.responses ?? responsesBody), { status: 200 })
+          }
+          return new Response(JSON.stringify(modelsBody), { status: 200 })
+        },
+      }
+      return { ...s, deps }
+    }
+
+    it('passes when configs exist, the key is in the shell and the gateway answers', async () => {
+      const d = doctorSetup({ shellKey: KEY })
+      await run(['apply', 'all', '--api-key', KEY, '--no-verify'], d.deps)
+      d.out.length = 0
+      expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(0)
+      expect(d.out.every((l) => l.startsWith('[ok]'))).toBe(true)
+    })
+    it('flags the key missing from the shell and says how to load it', async () => {
+      const d = doctorSetup()
+      await run(['apply', 'codex', '--api-key', KEY, '--no-verify', '--persist-key'], d.deps)
+      d.out.length = 0
+      expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(1)
+      const line = d.out.find((l) => l.includes('NOT set')) ?? ''
+      expect(line.startsWith('[FAIL]')).toBe(true)
+      expect(line).toContain('. /home/u/.config/agent-helper-internal/env')
+    })
+    it('reports an unconfigured tool with the command that fixes it', async () => {
+      const d = doctorSetup({ shellKey: KEY })
+      expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(1)
+      expect(d.out.join('\n')).toContain('agent-helper-internal apply codex')
+    })
+    it('detects a gateway whose /v1/responses is not a Responses object', async () => {
+      const d = doctorSetup({ shellKey: KEY, responses: { hello: 'world' } })
+      await run(['apply', 'all', '--api-key', KEY, '--no-verify'], d.deps)
+      d.out.length = 0
+      expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(1)
+      expect(d.out.find((l) => l.includes('/v1/responses'))).toContain('[FAIL]')
+    })
+    it('reports a rejected key', async () => {
+      const d = doctorSetup({ shellKey: KEY, status: 401 })
+      expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(1)
+      expect(d.out.join('\n')).toContain('rejected the API key')
     })
   })
 })

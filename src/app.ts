@@ -9,7 +9,7 @@ import {
   type GatewayConfig, type Result, type Tool, type ToolStatus,
 } from './domain.js'
 import { applyShellRc, keyEnvContent, keyEnvFile, rcFileFor } from './shell.js'
-import { fetchTiers, type FetchFn, type GatewayError } from './gateway.js'
+import { fetchTiers, smokeResponses, type FetchFn, type GatewayError } from './gateway.js'
 
 const EnvSchema = z.object({
   LLM_PROXY_API_KEY: z.string().optional(),
@@ -45,6 +45,7 @@ Usage:
   agent-helper-internal status [--api-key K] [--base-url U]
   agent-helper-internal restore <claude|codex> [--snapshot NAME]
   agent-helper-internal models [--api-key K] [--base-url U]
+  agent-helper-internal doctor [--api-key K] [--base-url U]   # end-to-end checks; run it when something does not work
 
 Tiers: auto/high (opus), auto/normal (sonnet), auto/fast (haiku).
 Key: --api-key or $${API_KEY_ENV_VAR}; if neither is set and this is a terminal, you are asked for it (hidden input). Base URL: --base-url or $LLM_PROXY_BASE_URL (default ${DEFAULT_BASE_URL}).
@@ -214,11 +215,13 @@ export async function run(argv: readonly string[], deps: Deps): Promise<number> 
     }
     case 'apply':
     case 'status':
-    case 'models': {
+    case 'models':
+    case 'doctor': {
       const cfg = await resolveConfig(values, deps, { mayPrompt: command !== 'status' })
       if (typeof cfg === 'string') { deps.err(cfg); return EXIT_USAGE }
       if (command === 'status') return runStatus(cfg, deps)
       if (command === 'models') return runModels(cfg, deps)
+      if (command === 'doctor') return runDoctor(cfg, deps)
       const tools = arg === 'all' ? TOOLS : TOOLS.filter((t) => t === arg)
       if (tools.length === 0) { deps.err(`apply needs a tool: ${TOOLS.join('|')}|all`); return EXIT_USAGE }
       if (values['no-verify'] !== true) {
@@ -264,4 +267,57 @@ async function runModels(cfg: GatewayConfig, deps: Deps): Promise<number> {
   if (!tiers.ok) { deps.err(describeGatewayError(tiers.error)); return EXIT_FAIL }
   for (const t of tiers.value) deps.out(`${t.model.padEnd(12)} → ${t.members}`)
   return EXIT_OK
+}
+
+type Check = Readonly<{ ok: boolean; line: string }>
+
+/** Everything that has to be true for `codex -p llm-*` and Claude Code to reach the gateway, each with its fix. */
+async function runDoctor(cfg: GatewayConfig, deps: Deps): Promise<number> {
+  const checks: Check[] = []
+  const envFile = keyEnvFile(deps.home)
+  const fileExists = (await deps.fs.read(envFile)) !== undefined
+
+  const claude = detectClaude(await deps.fs.read(targetPath('claude', deps)), cfg)
+  checks.push({
+    ok: claude.ok && claude.value.state === 'configured',
+    line: `Claude Code config: ${claude.ok ? describeStatus(claude.value) : `unreadable (${claude.error.detail})`}${claude.ok && claude.value.state === 'configured' ? '' : `  -> run: agent-helper-internal apply claude`}`,
+  })
+
+  const codex = detectCodex({
+    config: await deps.fs.read(targetPath('codex', deps)),
+    profiles: {
+      high: await deps.fs.read(profilePath(codexHome(deps), 'high')),
+      normal: await deps.fs.read(profilePath(codexHome(deps), 'normal')),
+      fast: await deps.fs.read(profilePath(codexHome(deps), 'fast')),
+    },
+  }, cfg)
+  checks.push({
+    ok: codex.ok && codex.value.state === 'configured',
+    line: `Codex config: ${codex.ok ? describeStatus(codex.value) : `unreadable (${codex.error.detail})`}${codex.ok && codex.value.state === 'configured' ? '' : `  -> run: agent-helper-internal apply codex`}`,
+  })
+
+  const inShell = (deps.env.LLM_PROXY_API_KEY ?? '').trim() !== ''
+  checks.push({
+    ok: inShell,
+    line: inShell
+      ? `$${API_KEY_ENV_VAR} is set in this shell (Codex reads it from here)`
+      : `$${API_KEY_ENV_VAR} is NOT set in this shell, so Codex fails with "Missing environment variable"  -> ${fileExists ? `open a new terminal, or run: . ${envFile}` : `run: agent-helper-internal apply codex --persist-key, or export ${API_KEY_ENV_VAR}=<key>`}`,
+  })
+  checks.push({ ok: true, line: `Plain \`codex\` keeps your own default provider; use \`codex -p ${profileName('normal')}\` (or --default when applying) to go through the gateway` })
+
+  const tiers = await fetchTiers(deps.fetch, cfg)
+  checks.push({
+    ok: tiers.ok && tiers.value.length === TIERS.length,
+    line: tiers.ok
+      ? `Gateway tiers: ${tiers.value.map((t) => t.model).join(', ') || 'none'}${tiers.value.length === TIERS.length ? '' : '  (a tier is missing)'}`
+      : `Gateway /v1/models: ${describeGatewayError(tiers.error)}`,
+  })
+  const smoke = await smokeResponses(deps.fetch, cfg)
+  checks.push({
+    ok: smoke.ok,
+    line: smoke.ok ? 'Gateway /v1/responses (the wire Codex uses): ok' : `Gateway /v1/responses: ${describeGatewayError(smoke.error)}`,
+  })
+
+  for (const c of checks) deps.out(`${c.ok ? '[ok]  ' : '[FAIL]'} ${c.line}`)
+  return checks.every((c) => c.ok) ? EXIT_OK : EXIT_FAIL
 }

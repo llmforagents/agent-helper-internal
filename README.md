@@ -19,7 +19,7 @@ In a terminal it asks for your API key (input hidden) and, for Codex, whether to
 `~/.config/agent-helper-internal/env` (mode 0600) and source it from your shell rc, because Codex reads the key
 from `$LLM_PROXY_API_KEY` at runtime. Open a new shell afterwards.
 
-Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.0 ...`.
+Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.1 ...`.
 Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then use `agent-helper-internal` directly.
 
 ## Use
@@ -28,6 +28,7 @@ Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then
 npx @llmforagents/agent-helper-internal apply all          # or: claude | codex   (--dry-run to preview, --default for Codex)
 npx @llmforagents/agent-helper-internal status
 npx @llmforagents/agent-helper-internal models             # tiers the gateway serves right now
+npx @llmforagents/agent-helper-internal doctor             # something not working? checks configs, shell env and the gateway end to end
 npx @llmforagents/agent-helper-internal restore claude     # undo (backups in ~/.config/agent-helper-internal/backups)
 ```
 
@@ -35,6 +36,14 @@ Non-interactive (CI, scripts): pass `--api-key K` or export `LLM_PROXY_API_KEY`;
 Codex reads the key from `$LLM_PROXY_API_KEY` at runtime; it is never written to its config.
 Claude Code stores it in `~/.claude/settings.json` (`ANTHROPIC_AUTH_TOKEN`), as Claude Code requires.
 Options: `--base-url`, `--api-key`, `--persist-key`, `--no-verify`. `restore` also removes the stored key and the rc block. Honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
+
+## Troubleshooting Codex
+
+Run `npx @llmforagents/agent-helper-internal doctor`. The usual causes:
+
+- **`Missing environment variable: LLM_PROXY_API_KEY`**: the terminal was opened before the key was stored. Open a new terminal or run `. ~/.config/agent-helper-internal/env`.
+- **Plain `codex` still uses your old provider**: only `codex -p llm-normal|llm-high|llm-fast` goes through the gateway. Apply with `--default` to make plain `codex` use `auto/normal`.
+- **"Model metadata for `auto/normal` not found"**: a harmless warning; Codex falls back to generic model metadata.
 
 ## Release (maintainers)
 

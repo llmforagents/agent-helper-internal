@@ -1,6 +1,6 @@
 {
   "name": "@llmforagents/agent-helper-internal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Internal helper: points Claude Code and Codex at the llm-proxy gateway with auto/high|normal|fast tiers",
   "license": "UNLICENSED",
   "type": "module",

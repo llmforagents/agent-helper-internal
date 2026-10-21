@@ -16,12 +16,15 @@ const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
 export const keyEnvContent = (apiKey: string): string => `export ${API_KEY_ENV_VAR}=${shQuote(apiKey)}\n`
 
-/** Pure: adds (or refreshes) the managed block that sources the env file. Idempotent. */
+/**
+ * Pure: puts the managed block at the TOP of the rc file (replacing any existing copy). It must come first:
+ * lines such as `eval "$(zellij setup --generate-auto-start bash)"` or an interactivity guard stop the rest of the
+ * file from running in the outer shell, which would leave $LLM_PROXY_API_KEY unset. Idempotent.
+ */
 export function applyShellRc(text: string, envFile: string): string {
   const block = `${BEGIN}\n[ -f ${shQuote(envFile)} ] && . ${shQuote(envFile)}\n${END}`
   const start = text.indexOf(BEGIN)
   const end = start === -1 ? -1 : text.indexOf(END, start)
-  if (start !== -1 && end !== -1) return text.slice(0, start) + block + text.slice(end + END.length)
-  const body = text.trimEnd()
-  return `${body}${body === '' ? '' : '\n\n'}${block}\n`
+  const rest = start !== -1 && end !== -1 ? (text.slice(0, start) + text.slice(end + END.length)).replace(/^\n+/, '') : text
+  return `${block}\n${rest === '' ? '' : `\n${rest}`}`
 }
