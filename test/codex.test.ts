@@ -4,10 +4,11 @@ import { applyCodexConfig, canWriteProfile, catalogEntry, codexDefaultProvider, 
 import { testConfig } from './helpers.js'
 
 const cfg = testConfig()
+const KEYFILE = '/h/.config/agent-helper-internal/api-key'
 const USER = 'model_provider = "ZAI"\nmodel = "glm"\n# keep me\n\n[model_providers.ZAI]\nname = "ZAI"\nbase_url = "https://z.ai"\n'
 
 function ok(text: string, makeDefault = false): string {
-  const r = applyCodexConfig(text, cfg, { makeDefault })
+  const r = applyCodexConfig(text, cfg, { makeDefault, keyFile: KEYFILE })
   if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.detail}`)
   return r.value
 }
@@ -16,8 +17,15 @@ describe('applyCodexConfig', () => {
   it('adds the provider with base_url ending in /v1 and the responses wire API', () => {
     const parsed = TOML.parse(ok(USER)) as any
     expect(parsed.model_providers['llm-proxy']).toMatchObject({
-      base_url: 'https://gw.example/v1', wire_api: 'responses', env_key: 'LLM_PROXY_API_KEY', requires_openai_auth: false,
+      base_url: 'https://gw.example/v1', wire_api: 'responses', requires_openai_auth: false,
     })
+  })
+  it('gets the key from a command reading the key file, never from env_key or an inline token', () => {
+    const out = ok(USER)
+    const provider = (TOML.parse(out) as any).model_providers['llm-proxy']
+    expect(provider.auth).toEqual({ command: 'cat', args: [KEYFILE] })
+    expect(provider.env_key).toBeUndefined()
+    expect(provider.experimental_bearer_token).toBeUndefined()
   })
   it('does not use the legacy [profiles.*] tables Codex >= 0.134 rejects', () => {
     const out = ok(USER, true)
@@ -46,10 +54,10 @@ describe('applyCodexConfig', () => {
     expect(ok(once, true)).toBe(once)
   })
   it('refuses to clobber a provider the user defined by hand', () => {
-    expect(applyCodexConfig('[model_providers.llm-proxy]\nname="x"\n', cfg, { makeDefault: false }).ok).toBe(false)
+    expect(applyCodexConfig('[model_providers.llm-proxy]\nname="x"\n', cfg, { makeDefault: false, keyFile: KEYFILE }).ok).toBe(false)
   })
   it('rejects invalid TOML', () => {
-    expect(applyCodexConfig('model = ', cfg, { makeDefault: false }).ok).toBe(false)
+    expect(applyCodexConfig('model = ', cfg, { makeDefault: false, keyFile: KEYFILE }).ok).toBe(false)
   })
 })
 
@@ -68,6 +76,11 @@ describe('profile files', () => {
 
 describe('detectCodex', () => {
   const profiles = { high: profileContent('high'), normal: profileContent('normal'), fast: profileContent('fast') }
+  it('flags an older env_key-style provider as partial so doctor tells the user to re-apply', () => {
+    const legacy = 'model_provider = "llm-proxy"\n# >>> agent-helper-internal (managed, do not edit) >>>\n[model_providers.llm-proxy]\nbase_url = "https://gw.example/v1"\nenv_key = "LLM_PROXY_API_KEY"\n# <<< agent-helper-internal <<<\n'
+    const r = detectCodex({ config: legacy, profiles }, cfg)
+    expect(r.ok && r.value.state).toBe('partial')
+  })
   it('detects not_configured, partial and configured', () => {
     expect(detectCodex({ config: USER, profiles: { high: undefined, normal: undefined, fast: undefined } }, cfg))
       .toEqual({ ok: true, value: { state: 'not_configured' } })
@@ -145,9 +158,9 @@ describe('model catalog', () => {
     expect(declaredCatalogPath('model = "x"\n', '/c', '/h')).toBeUndefined()
   })
   it('applyCodexConfig sets model_catalog_json only when asked', () => {
-    const withIt = applyCodexConfig('', cfg, { makeDefault: true, catalogPath: '/c/llm-proxy-models.json' })
+    const withIt = applyCodexConfig('', cfg, { makeDefault: true, catalogPath: '/c/llm-proxy-models.json', keyFile: KEYFILE })
     expect(withIt.ok && (TOML.parse(withIt.value) as any).model_catalog_json).toBe('/c/llm-proxy-models.json')
-    const without = applyCodexConfig('', cfg, { makeDefault: true })
+    const without = applyCodexConfig('', cfg, { makeDefault: true, keyFile: KEYFILE })
     expect(without.ok && (TOML.parse(without.value) as any).model_catalog_json).toBeUndefined()
   })
 })

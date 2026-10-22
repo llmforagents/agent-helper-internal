@@ -8,7 +8,7 @@ import {
   API_KEY_ENV_VAR, ApiKey, BaseUrl, DEFAULT_BASE_URL, Err, Ok, PROVIDER_ID, TIERS, TIER_MODEL, TOOLS, assertNever, redactKey,
   type GatewayConfig, type Result, type Tool, type ToolStatus,
 } from './domain.js'
-import { applyShellRc, keyEnvContent, keyEnvFile, rcFileFor } from './shell.js'
+import { keyFilePath } from './keyfile.js'
 import { fetchTiers, smokeResponses, type FetchFn, type GatewayError } from './gateway.js'
 
 const EnvSchema = z.object({
@@ -41,7 +41,7 @@ export type Deps = Readonly<{
 const USAGE = `agent-helper-internal — point Claude Code and Codex at the llm-proxy gateway
 
 Usage:
-  agent-helper-internal apply <claude|codex|all> [--api-key K] [--base-url U] [--no-default] [--persist-key] [--dry-run] [--no-verify]
+  agent-helper-internal apply <claude|codex|all> [--api-key K] [--base-url U] [--no-default] [--dry-run] [--no-verify]
   agent-helper-internal status [--api-key K] [--base-url U]
   agent-helper-internal restore <claude|codex> [--snapshot NAME]
   agent-helper-internal models [--api-key K] [--base-url U]
@@ -49,7 +49,7 @@ Usage:
 
 Tiers: auto/high (opus), auto/normal (sonnet), auto/fast (haiku).
 Key: --api-key or $${API_KEY_ENV_VAR}; if neither is set and this is a terminal, you are asked for it (hidden input). Base URL: --base-url or $LLM_PROXY_BASE_URL (default ${DEFAULT_BASE_URL}).
---persist-key (codex): store the key in a 0600 file and source it from your shell rc, so Codex finds $${API_KEY_ENV_VAR}; asked interactively when omitted.
+Codex gets the key from a 0600 file (~/.config/agent-helper-internal/api-key) via its provider auth command, so no shell setup or env var is needed.
 Codex: by default plain \`codex\` goes through the gateway (model_provider + model = auto/normal; review_model/default_subagent_model are remapped if you set them). \`codex -p ${profileName('high')}|${profileName('normal')}|${profileName('fast')}\` picks a tier. --no-default only adds the profiles and leaves your current default; \`restore codex\` undoes everything.`
 
 const OPTIONS = {
@@ -60,7 +60,6 @@ const OPTIONS = {
   'no-default': { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   'no-verify': { type: 'boolean' },
-  'persist-key': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -124,7 +123,7 @@ async function planClaude(cfg: GatewayConfig, deps: Deps): Promise<Planned> {
   return next.ok ? Ok([{ target, content: next.value }]) : Err(`cannot edit ${target}: ${next.error.kind} (${next.error.detail})`)
 }
 
-async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: boolean; persistKey: boolean }>, deps: Deps): Promise<Planned> {
+async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: boolean }>, deps: Deps): Promise<Planned> {
   const target = targetPath('codex', deps)
   const current = (await deps.fs.read(target)) ?? ''
   // Keep the user's own catalog when they have one; otherwise create ours, but only when the gateway becomes the default.
@@ -132,6 +131,7 @@ async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: bool
   const catalogPath = declared ?? (flags.makeDefault ? defaultCatalogPath(codexHome(deps)) : undefined)
   const next = applyCodexConfig(current, cfg, {
     makeDefault: flags.makeDefault,
+    keyFile: keyFilePath(deps.home),
     ...(declared === undefined && catalogPath !== undefined ? { catalogPath } : {}),
   })
   if (!next.ok) return Err(`cannot edit ${target}: ${next.error.kind} (${next.error.detail})`)
@@ -146,29 +146,14 @@ async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: bool
     if (!canWriteProfile(await deps.fs.read(file))) return Err(`${file} exists and was not written by this tool; move it away first`)
     files.push({ target: file, content: profileContent(tier) })
   }
-  if (flags.persistKey) {
-    const envFile = keyEnvFile(deps.home)
-    const rc = rcFileFor(deps.home, deps.env.SHELL)
-    files.push({ target: envFile, content: keyEnvContent(cfg.apiKey) })
-    files.push({ target: rc, content: applyShellRc((await deps.fs.read(rc)) ?? '', envFile) })
-  }
+  files.push({ target: keyFilePath(deps.home), content: cfg.apiKey })
   return Ok(files)
 }
 
-type ApplyFlags = Readonly<{ makeDefault: boolean; dryRun: boolean; persistKey: boolean | undefined }>
-
-/** Asks whether to store the key for Codex; only when it was not decided by a flag and a human is present. */
-async function decidePersist(flags: ApplyFlags, deps: Deps): Promise<boolean> {
-  if (flags.persistKey !== undefined) return flags.persistKey
-  if (!deps.interactive || flags.dryRun) return false
-  const rc = rcFileFor(deps.home, deps.env.SHELL)
-  const answer = await deps.prompt(`Codex reads the key from $${API_KEY_ENV_VAR}. Store it in ${keyEnvFile(deps.home)} (0600) and source it from ${rc}? [y/N] `, { hidden: false })
-  return /^y(es)?$/i.test(answer.trim())
-}
+type ApplyFlags = Readonly<{ makeDefault: boolean; dryRun: boolean }>
 
 async function applyOne(tool: Tool, cfg: GatewayConfig, flags: ApplyFlags, deps: Deps): Promise<boolean> {
-  const persistKey = tool === 'codex' && await decidePersist(flags, deps)
-  const planned = tool === 'claude' ? await planClaude(cfg, deps) : await planCodex(cfg, { makeDefault: flags.makeDefault, persistKey }, deps)
+  const planned = tool === 'claude' ? await planClaude(cfg, deps) : await planCodex(cfg, { makeDefault: flags.makeDefault }, deps)
   if (!planned.ok) {
     deps.err(`${tool}: ${planned.error}`)
     return false
@@ -189,9 +174,7 @@ async function applyOne(tool: Tool, cfg: GatewayConfig, flags: ApplyFlags, deps:
   const snapshot = await writeWithBackup(deps.fs, { home: deps.home, tool, files: changed, now: deps.now() })
   deps.out(`${tool}: updated ${names} (backup ${snapshot})`)
   if (tool === 'codex') {
-    deps.out(persistKey
-      ? '  key stored; open a new shell (or `source` your rc file) so Codex sees it'
-      : `  export ${API_KEY_ENV_VAR}=<your key>   # Codex reads the key from the environment`)
+    deps.out(`  key stored in ${keyFilePath(deps.home)} (0600); Codex reads it through its provider auth command, no env var needed`)
     deps.out(flags.makeDefault
       ? `  plain \`codex\` now uses ${TIER_MODEL.normal} via the gateway (restart open Codex sessions); tiers: codex -p ${profileName('high')} | ${profileName('fast')}\n  if /model still lists old models: Codex's background server caches them; run \`codex app-server daemon restart\` (it interrupts running Codex sessions)`
       : `  your default is unchanged; run: codex -p ${profileName('high')} | ${profileName('normal')} | ${profileName('fast')}`)
@@ -246,7 +229,7 @@ export async function run(argv: readonly string[], deps: Deps): Promise<number> 
       deps.out(`gateway ${cfg.baseUrl}  key ${redactKey(cfg.apiKey)}`)
       let allOk = true
       for (const tool of tools) {
-        const ok = await applyOne(tool, cfg, { makeDefault: values['no-default'] !== true, dryRun: values['dry-run'] === true, persistKey: values['persist-key'] }, deps)
+        const ok = await applyOne(tool, cfg, { makeDefault: values['no-default'] !== true, dryRun: values['dry-run'] === true }, deps)
         allOk = allOk && ok
       }
       return allOk ? EXIT_OK : EXIT_FAIL
@@ -287,8 +270,6 @@ type Check = Readonly<{ ok: boolean; line: string }>
 /** Everything that has to be true for `codex -p llm-*` and Claude Code to reach the gateway, each with its fix. */
 async function runDoctor(cfg: GatewayConfig, deps: Deps): Promise<number> {
   const checks: Check[] = []
-  const envFile = keyEnvFile(deps.home)
-  const fileExists = (await deps.fs.read(envFile)) !== undefined
 
   const claude = detectClaude(await deps.fs.read(targetPath('claude', deps)), cfg)
   checks.push({
@@ -309,12 +290,14 @@ async function runDoctor(cfg: GatewayConfig, deps: Deps): Promise<number> {
     line: `Codex config: ${codex.ok ? describeStatus(codex.value) : `unreadable (${codex.error.detail})`}${codex.ok && codex.value.state === 'configured' ? '' : `  -> run: agent-helper-internal apply codex`}`,
   })
 
-  const inShell = (deps.env.LLM_PROXY_API_KEY ?? '').trim() !== ''
+  const stored = (await deps.fs.read(keyFilePath(deps.home)))?.trim() ?? ''
   checks.push({
-    ok: inShell,
-    line: inShell
-      ? `$${API_KEY_ENV_VAR} is set in this shell (Codex reads it from here)`
-      : `$${API_KEY_ENV_VAR} is NOT set in this shell, so Codex fails with "Missing environment variable"  -> ${fileExists ? `open a new terminal, or run: . ${envFile}` : `run: agent-helper-internal apply codex --persist-key, or export ${API_KEY_ENV_VAR}=<key>`}`,
+    ok: stored !== '',
+    line: stored === ''
+      ? `Codex key file ${keyFilePath(deps.home)} is missing or empty  -> run: agent-helper-internal apply codex`
+      : stored === cfg.apiKey
+        ? 'Codex key file matches the key being checked (read through the provider auth command, no env var needed)'
+        : 'Codex key file holds a different key than the one being checked  -> run: agent-helper-internal apply codex with the right key',
   })
   const defaultProvider = codexDefaultProvider(await deps.fs.read(targetPath('codex', deps)))
   checks.push({

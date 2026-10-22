@@ -96,7 +96,7 @@ describe('run', () => {
 
   describe('interactive key', () => {
     it('asks for the key (hidden) when none is given and uses it', async () => {
-      const s = setup({}, 200, [KEY, 'n'], true)
+      const s = setup({}, 200, [KEY], true)
       expect(await run(['apply', 'all'], s.deps)).toBe(0)
       expect(s.asked[0]).toEqual({ question: expect.stringContaining('API key'), hidden: true })
       expect(s.calls[0]).toContain(`Bearer ${KEY}`)
@@ -104,7 +104,7 @@ describe('run', () => {
       expect(s.out.join('\n') + s.err.join('\n')).not.toContain(KEY)
     })
     it('does not ask when the key comes from a flag or env', async () => {
-      const s = setup({}, 200, ['n'], true)
+      const s = setup({}, 200, [], true)
       await run(['apply', 'claude', '--api-key', KEY], s.deps)
       expect(s.asked).toHaveLength(0)
     })
@@ -122,52 +122,6 @@ describe('run', () => {
       const s = setup({}, 200, [KEY], true)
       expect(await run(['status'], s.deps)).toBe(0)
       expect(s.asked).toHaveLength(0)
-    })
-  })
-
-  describe('persisting the key for Codex', () => {
-    const ENV = '/home/u/.config/agent-helper-internal/env'
-    it('--persist-key writes a 0600-style env file and sources it from the rc, once', async () => {
-      const s = setup({ '/home/u/.bashrc': '# mine\n' })
-      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
-      expect(s.fs.files.get(ENV)).toBe(`export LLM_PROXY_API_KEY='${KEY}'\n`)
-      const rc = s.fs.files.get('/home/u/.bashrc') ?? ''
-      expect(rc.startsWith('# >>> agent-helper-internal >>>')).toBe(true)
-      expect(rc.trimEnd().endsWith('# mine')).toBe(true)
-      expect(rc.match(/agent-helper-internal >>>/g)).toHaveLength(1)
-      expect(rc).not.toContain(KEY)
-      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
-      expect((s.fs.files.get('/home/u/.bashrc') ?? '').match(/agent-helper-internal >>>/g)).toHaveLength(1)
-    })
-    it('asks interactively and honours a "yes"', async () => {
-      const s = setup({}, 200, ['y'], true)
-      await run(['apply', 'codex', '--api-key', KEY], s.deps)
-      expect(s.asked[0]?.hidden).toBe(false)
-      expect(s.fs.files.has(ENV)).toBe(true)
-    })
-    it('does not persist on "no", dry-run, or non-interactive runs', async () => {
-      const no = setup({}, 200, ['n'], true)
-      await run(['apply', 'codex', '--api-key', KEY], no.deps)
-      expect(no.fs.files.has(ENV)).toBe(false)
-      const dry = setup({}, 200, [], true)
-      await run(['apply', 'codex', '--api-key', KEY, '--dry-run'], dry.deps)
-      expect(dry.asked).toHaveLength(0)
-      const batch = setup()
-      await run(['apply', 'codex', '--api-key', KEY], batch.deps)
-      expect(batch.fs.files.has(ENV)).toBe(false)
-    })
-    it('restore removes the env file and the rc block', async () => {
-      const s = setup({ '/home/u/.bashrc': '# mine\n' })
-      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], s.deps)
-      await run(['restore', 'codex'], s.deps)
-      expect(s.fs.files.has(ENV)).toBe(false)
-      expect(s.fs.files.get('/home/u/.bashrc')).toBe('# mine\n')
-    })
-    it('uses .zshrc for zsh', async () => {
-      const s = setup()
-      const deps: Deps = { ...s.deps, env: { SHELL: '/usr/bin/zsh' } }
-      await run(['apply', 'codex', '--api-key', KEY, '--persist-key'], deps)
-      expect(s.fs.files.has('/home/u/.zshrc')).toBe(true)
     })
   })
 
@@ -190,21 +144,21 @@ describe('run', () => {
       return { ...s, deps }
     }
 
-    it('passes when configs exist, the key is in the shell and the gateway answers', async () => {
+    it('passes when configs exist, the key file matches and the gateway answers', async () => {
       const d = doctorSetup({ shellKey: KEY })
       await run(['apply', 'all', '--api-key', KEY, '--no-verify'], d.deps)
       d.out.length = 0
       expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(0)
       expect(d.out.every((l) => l.startsWith('[ok]'))).toBe(true)
     })
-    it('flags the key missing from the shell and says how to load it', async () => {
+    it('flags a missing key file and says how to fix it', async () => {
       const d = doctorSetup()
-      await run(['apply', 'codex', '--api-key', KEY, '--no-verify', '--persist-key'], d.deps)
+      await run(['apply', 'claude', '--api-key', KEY, '--no-verify'], d.deps)
       d.out.length = 0
       expect(await run(['doctor', '--api-key', KEY], d.deps)).toBe(1)
-      const line = d.out.find((l) => l.includes('NOT set')) ?? ''
+      const line = d.out.find((l) => l.includes('key file')) ?? ''
       expect(line.startsWith('[FAIL]')).toBe(true)
-      expect(line).toContain('. /home/u/.config/agent-helper-internal/env')
+      expect(line).toContain('apply codex')
     })
     it('reports an unconfigured tool with the command that fixes it', async () => {
       const d = doctorSetup({ shellKey: KEY })
@@ -273,6 +227,30 @@ describe('run', () => {
       const s = setup({ [CFG]: 'model_catalog_json = "/m.json"\n', '/m.json': 'garbage' })
       expect(await run(['apply', 'codex', '--api-key', KEY], s.deps)).toBe(1)
       expect(s.fs.files.get('/m.json')).toBe('garbage')
+    })
+  })
+
+  describe('Codex key file', () => {
+    const KEYFILE = '/home/u/.config/agent-helper-internal/api-key'
+    it('stores the key in a file that the provider auth command reads, and never in config.toml', async () => {
+      const s = setup()
+      await run(['apply', 'codex', '--api-key', KEY], s.deps)
+      expect(s.fs.files.get(KEYFILE)).toBe(KEY)
+      const config = s.fs.files.get('/home/u/.codex/config.toml') ?? ''
+      expect(config).toContain(`args = ["${KEYFILE}"]`)
+      expect(config).not.toContain(KEY)
+      expect(config).not.toContain('env_key')
+    })
+    it('does not ask about shell setup', async () => {
+      const s = setup({}, 200, [KEY], true)
+      await run(['apply', 'all'], s.deps)
+      expect(s.asked).toHaveLength(1)
+    })
+    it('restore removes the key file', async () => {
+      const s = setup()
+      await run(['apply', 'codex', '--api-key', KEY], s.deps)
+      await run(['restore', 'codex'], s.deps)
+      expect(s.fs.files.has(KEYFILE)).toBe(false)
     })
   })
 })

@@ -1,7 +1,7 @@
 import path from 'node:path'
 import TOML from '@iarna/toml'
 import { z } from 'zod'
-import { API_KEY_ENV_VAR, Err, Ok, PROVIDER_ID, TIER_MODEL, TIERS, type EditError, type GatewayConfig, type Result, type Tier, type ToolStatus } from './domain.js'
+import { Err, Ok, PROVIDER_ID, TIER_MODEL, TIERS, type EditError, type GatewayConfig, type Result, type Tier, type ToolStatus } from './domain.js'
 
 const BEGIN = '# >>> agent-helper-internal (managed, do not edit) >>>'
 const END = '# <<< agent-helper-internal <<<'
@@ -15,15 +15,20 @@ export const profilePath = (codexHome: string, tier: Tier): string => path.join(
 /** Codex appends `/responses` to base_url, so the OpenAI-style root must end in `/v1`. */
 export const codexBaseUrl = (cfg: GatewayConfig): string => `${cfg.baseUrl}/v1`
 
-export function providerBlock(cfg: GatewayConfig): string {
+export function providerBlock(cfg: GatewayConfig, keyFile: string): string {
   return [
     BEGIN,
     `[model_providers.${PROVIDER_ID}]`,
     `name = "llm-proxy"`,
     `base_url = ${JSON.stringify(codexBaseUrl(cfg))}`,
-    `env_key = ${JSON.stringify(API_KEY_ENV_VAR)}`,
     `wire_api = "responses"`,
     `requires_openai_auth = false`,
+    '',
+    // The token comes from a command, not from env_key: Codex resolves env_key inside its shared background
+    // server, whose environment is whatever started it, so "Missing environment variable" kept coming back.
+    `[model_providers.${PROVIDER_ID}.auth]`,
+    `command = "cat"`,
+    `args = [${JSON.stringify(keyFile)}]`,
     END,
   ].join('\n')
 }
@@ -81,6 +86,8 @@ export type CodexOptions = Readonly<{
   makeDefault: boolean
   /** Set `model_catalog_json` to this path (only used when the user has none yet). */
   catalogPath?: string
+  /** File the provider's auth command reads the key from. */
+  keyFile: string
 }>
 
 const CATALOG_CONTEXT_WINDOW = 200_000
@@ -195,7 +202,7 @@ export function applyCodexConfig(text: string, cfg: GatewayConfig, opts: CodexOp
     return Err({ kind: 'conflict', detail: `[model_providers.${PROVIDER_ID}] already exists outside the managed block` })
   }
   const body = without.trimEnd()
-  let next = `${body}${body === '' ? '' : '\n\n'}${providerBlock(cfg)}\n`
+  let next = `${body}${body === '' ? '' : '\n\n'}${providerBlock(cfg, opts.keyFile)}\n`
   if (opts.makeDefault) {
     next = setTopLevelKey(next, 'model', TIER_MODEL.normal)
     next = setTopLevelKey(next, 'model_provider', PROVIDER_ID)
@@ -212,9 +219,12 @@ export function detectCodex(files: CodexFiles, cfg: GatewayConfig): Result<ToolS
   if (files.config === undefined || findBlock(files.config) === undefined) return Ok({ state: 'not_configured' })
   const parsed = parseToml(files.config)
   if (!parsed.ok) return parsed
-  const providers = z.record(z.string(), z.object({ base_url: z.unknown() }).passthrough()).safeParse(parsed.value['model_providers'])
-  const current = providers.success ? providers.data[PROVIDER_ID]?.base_url : undefined
-  if (current !== codexBaseUrl(cfg)) return Ok({ state: 'foreign', current: String(current) })
-  const missing = TIERS.filter((t) => files.profiles[t] !== profileContent(t)).map((t) => `${profileName(t)}.config.toml`)
+  const providers = z.record(z.string(), z.object({ base_url: z.unknown(), auth: z.unknown().optional() }).passthrough()).safeParse(parsed.value['model_providers'])
+  const provider = providers.success ? providers.data[PROVIDER_ID] : undefined
+  if (provider?.base_url !== codexBaseUrl(cfg)) return Ok({ state: 'foreign', current: String(provider?.base_url) })
+  const missing: string[] = []
+  // Older configs used env_key, which fails inside Codex's background server.
+  if (provider.auth === undefined) missing.push('provider auth command (re-run apply)')
+  missing.push(...TIERS.filter((t) => files.profiles[t] !== profileContent(t)).map((t) => `${profileName(t)}.config.toml`))
   return Ok(missing.length === 0 ? { state: 'configured' } : { state: 'partial', missing })
 }

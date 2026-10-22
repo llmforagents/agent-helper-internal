@@ -15,9 +15,9 @@ Internal CLI that points **Claude Code** and **Codex** at the llm-proxy gateway
 npx @llmforagents/agent-helper-internal apply all
 ```
 
-In a terminal it asks for your API key (input hidden) and, for Codex, whether to store it in
-`~/.config/agent-helper-internal/env` (mode 0600) and source it from your shell rc, because Codex reads the key
-from `$LLM_PROXY_API_KEY` at runtime. Open a new shell afterwards.
+In a terminal it asks for your API key (input hidden). Nothing else to set up: Claude Code keeps the key in its `settings.json`,
+and for Codex the key is stored in `~/.config/agent-helper-internal/api-key` (mode 0600) and read through the provider's `auth`
+command, so no environment variable or shell rc change is needed (it works even inside Codex's shared background server).
 
 Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.3 ...`.
 Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then use `agent-helper-internal` directly.
@@ -32,17 +32,17 @@ npx @llmforagents/agent-helper-internal doctor             # something not worki
 npx @llmforagents/agent-helper-internal restore claude     # undo (backups in ~/.config/agent-helper-internal/backups)
 ```
 
-Non-interactive (CI, scripts): pass `--api-key K` or export `LLM_PROXY_API_KEY`; add `--persist-key` to store it for Codex.
+Non-interactive (CI, scripts): pass `--api-key K` or export `LLM_PROXY_API_KEY`.
 Codex: by default `apply` also makes plain `codex` use the gateway (`model_provider` + `model = auto/normal`); `restore codex` puts your previous default back.
-Codex reads the key from `$LLM_PROXY_API_KEY` at runtime; it is never written to its config.
+The Codex `config.toml` never contains the key, only the path of the key file.
 Claude Code stores it in `~/.claude/settings.json` (`ANTHROPIC_AUTH_TOKEN`), as Claude Code requires.
-Options: `--base-url`, `--api-key`, `--persist-key`, `--no-verify`. `restore` also removes the stored key and the rc block. Honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
+Options: `--base-url`, `--api-key`, `--no-verify`. `restore` also removes the stored key file. Honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
 
 ## Troubleshooting Codex
 
 Run `npx @llmforagents/agent-helper-internal doctor`. The usual causes:
 
-- **`Missing environment variable: LLM_PROXY_API_KEY`**: the terminal was opened before the key was stored. Open a new terminal or run `. ~/.config/agent-helper-internal/env`.
+- **`Missing environment variable: LLM_PROXY_API_KEY`**: you have an older setup that used `env_key`. Run `apply codex` again: the key now lives in a file read by the provider `auth` command, which works in every Codex session. `doctor` reports old setups as `partial`.
 - **`/status` in Codex still shows another provider**: restart the Codex session after applying. `apply` makes plain `codex` use `auto/normal` (it also remaps `review_model` / `default_subagent_model` if you had set them). Use `codex -p llm-high|llm-fast` for the other tiers, and `--no-default` if you want to keep your current default. Custom agent role files under `~/.codex/agents/` keep their own `model`; point them at `auto/high` / `auto/fast` if you use them.
 - **`/model` only lists other models** (e.g. `glm-*`): your `model_catalog_json` did not have the tiers. `apply` adds `auto/high|normal|fast` to it (or creates `~/.codex/llm-proxy-models.json`), which also removes the "Model metadata for `auto/normal` not found" warning. Then restart Codex's background server so it rereads the catalog: `codex app-server daemon restart` (**this interrupts running Codex sessions**; the "Server: Local background server" line in `/status` means you are connected to it).
 - **Editing files in Codex**: the tier entries leave `apply_patch_tool_type` unset on purpose (Codex only accepts `freeform`, which the gateway cannot carry), so the model edits files through the shell tool.
