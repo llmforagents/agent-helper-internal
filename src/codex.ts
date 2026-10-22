@@ -73,11 +73,33 @@ function setTopLevelKey(text: string, key: string, value: string): string {
   const tail = text.slice(cut)
   const existing = new RegExp(`^${key}\\s*=.*$`, 'm')
   if (existing.test(head)) return head.replace(existing, line) + tail
-  const sep = head === '' || head.endsWith('\n') ? '' : '\n'
-  return `${head}${sep}${line}\n${tail === '' || head.endsWith('\n\n') ? '' : '\n'}${tail}`
+  const keys = head.trimEnd()
+  return `${keys}${keys === '' ? '' : '\n'}${line}\n${tail === '' ? '' : `\n${tail.trimStart()}`}`
 }
 
 export type CodexOptions = Readonly<{ makeDefault: boolean }>
+
+const REVIEW_MODEL_LINE = /^review_model\s*=.*$/m
+const SUBAGENT_MODEL_LINE = /^default_subagent_model\s*=.*$/m
+
+/**
+ * Keys that name a model for the OLD provider and would be sent to the gateway as-is once it is the default
+ * (e.g. review_model = "glm-5.3"): remap them to tiers, but only when the user already set them.
+ */
+function remapDependentModels(text: string): string {
+  const withReview = REVIEW_MODEL_LINE.test(text) ? text.replace(REVIEW_MODEL_LINE, `review_model = ${JSON.stringify(TIER_MODEL.high)}`) : text
+  return SUBAGENT_MODEL_LINE.test(withReview)
+    ? withReview.replace(SUBAGENT_MODEL_LINE, `default_subagent_model = ${JSON.stringify(TIER_MODEL.fast)}`)
+    : withReview
+}
+
+/** The provider plain `codex` (no -p) resolves to, from the top-level `model_provider` key. */
+export function codexDefaultProvider(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined
+  const parsed = parseToml(text)
+  const value = parsed.ok ? parsed.value['model_provider'] : undefined
+  return typeof value === 'string' ? value : undefined
+}
 
 /**
  * Pure: new config.toml text with the provider block and, with `makeDefault`, top-level model_provider/model.
@@ -97,6 +119,7 @@ export function applyCodexConfig(text: string, cfg: GatewayConfig, opts: CodexOp
   if (opts.makeDefault) {
     next = setTopLevelKey(next, 'model', TIER_MODEL.normal)
     next = setTopLevelKey(next, 'model_provider', PROVIDER_ID)
+    next = remapDependentModels(next)
   }
   const verify = parseToml(next)
   return verify.ok ? Ok(next) : verify

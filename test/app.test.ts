@@ -224,4 +224,24 @@ describe('run', () => {
       expect(d.out.join('\n')).toContain('rejected the API key')
     })
   })
+
+  describe('Codex default', () => {
+    const CFG = '/home/u/.codex/config.toml'
+    const ZAI = 'model_provider = "ZAI"\nmodel = "glm-5.3"\n\n[model_providers.ZAI]\nname = "ZAI"\nbase_url = "https://z.ai"\n'
+    it('apply makes plain codex use the gateway by default, and restore brings ZAI back', async () => {
+      const s = setup({ [CFG]: ZAI })
+      expect(await run(['apply', 'codex', '--api-key', KEY], s.deps)).toBe(0)
+      expect(s.fs.files.get(CFG)).toContain('model_provider = "llm-proxy"')
+      expect(s.out.join('\n')).toContain('plain `codex` now uses auto/normal')
+      expect(await run(['restore', 'codex'], s.deps)).toBe(0)
+      expect(s.fs.files.get(CFG)).toBe(ZAI)
+    })
+    it('--no-default keeps the current provider but still adds the profiles', async () => {
+      const s = setup({ [CFG]: ZAI })
+      await run(['apply', 'codex', '--api-key', KEY, '--no-default'], s.deps)
+      expect(s.fs.files.get(CFG)).toContain('model_provider = "ZAI"')
+      expect(s.fs.files.has('/home/u/.codex/llm-high.config.toml')).toBe(true)
+      expect(s.out.join('\n')).toContain('your default is unchanged')
+    })
+  })
 })

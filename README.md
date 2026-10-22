@@ -25,7 +25,7 @@ Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then
 ## Use
 
 ```bash
-npx @llmforagents/agent-helper-internal apply all          # or: claude | codex   (--dry-run to preview, --default for Codex)
+npx @llmforagents/agent-helper-internal apply all          # or: claude | codex   (--dry-run to preview, --no-default to keep your current Codex default)
 npx @llmforagents/agent-helper-internal status
 npx @llmforagents/agent-helper-internal models             # tiers the gateway serves right now
 npx @llmforagents/agent-helper-internal doctor             # something not working? checks configs, shell env and the gateway end to end
@@ -33,6 +33,7 @@ npx @llmforagents/agent-helper-internal restore claude     # undo (backups in ~/
 ```
 
 Non-interactive (CI, scripts): pass `--api-key K` or export `LLM_PROXY_API_KEY`; add `--persist-key` to store it for Codex.
+Codex: by default `apply` also makes plain `codex` use the gateway (`model_provider` + `model = auto/normal`); `restore codex` puts your previous default back.
 Codex reads the key from `$LLM_PROXY_API_KEY` at runtime; it is never written to its config.
 Claude Code stores it in `~/.claude/settings.json` (`ANTHROPIC_AUTH_TOKEN`), as Claude Code requires.
 Options: `--base-url`, `--api-key`, `--persist-key`, `--no-verify`. `restore` also removes the stored key and the rc block. Honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
@@ -42,7 +43,7 @@ Options: `--base-url`, `--api-key`, `--persist-key`, `--no-verify`. `restore` al
 Run `npx @llmforagents/agent-helper-internal doctor`. The usual causes:
 
 - **`Missing environment variable: LLM_PROXY_API_KEY`**: the terminal was opened before the key was stored. Open a new terminal or run `. ~/.config/agent-helper-internal/env`.
-- **Plain `codex` still uses your old provider**: only `codex -p llm-normal|llm-high|llm-fast` goes through the gateway. Apply with `--default` to make plain `codex` use `auto/normal`.
+- **`/status` in Codex still shows another provider**: restart the Codex session after applying. `apply` makes plain `codex` use `auto/normal` (it also remaps `review_model` / `default_subagent_model` if you had set them). Use `codex -p llm-high|llm-fast` for the other tiers, and `--no-default` if you want to keep your current default. Custom agent role files under `~/.codex/agents/` keep their own `model`; point them at `auto/high` / `auto/fast` if you use them.
 - **"Model metadata for `auto/normal` not found"**: a harmless warning; Codex falls back to generic model metadata.
 
 ## Release (maintainers)

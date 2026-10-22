@@ -1,6 +1,6 @@
 import TOML from '@iarna/toml'
 import { describe, expect, it } from 'vitest'
-import { applyCodexConfig, canWriteProfile, detectCodex, profileContent, profilePath } from '../src/codex.js'
+import { applyCodexConfig, canWriteProfile, codexDefaultProvider, detectCodex, profileContent, profilePath } from '../src/codex.js'
 import { testConfig } from './helpers.js'
 
 const cfg = testConfig()
@@ -75,5 +75,37 @@ describe('detectCodex', () => {
     const partial = detectCodex({ config, profiles: { ...profiles, fast: undefined } }, cfg)
     expect(partial.ok && partial.value.state).toBe('partial')
     expect(detectCodex({ config, profiles }, cfg)).toEqual({ ok: true, value: { state: 'configured' } })
+  })
+})
+
+describe('default provider switch', () => {
+  const ZAI_CFG = 'model_provider = "ZAI"\nmodel = "glm-5.3"\nreview_model = "glm-5.3"\n\n[model_providers.ZAI]\nname = "ZAI"\nbase_url = "https://z.ai"\n\n[agents]\nenabled = true\ndefault_subagent_model = "glm-5.3-flash"\n'
+  it('remaps review_model and default_subagent_model that point at the old provider', () => {
+    const parsed = TOML.parse(ok(ZAI_CFG, true)) as any
+    expect(parsed.model_provider).toBe('llm-proxy')
+    expect(parsed.model).toBe('auto/normal')
+    expect(parsed.review_model).toBe('auto/high')
+    expect(parsed.agents.default_subagent_model).toBe('auto/fast')
+    expect(parsed.agents.enabled).toBe(true)
+    expect(parsed.model_providers.ZAI.base_url).toBe('https://z.ai')
+  })
+  it('does not invent those keys when the user never set them', () => {
+    const parsed = TOML.parse(ok('', true)) as any
+    expect(parsed.review_model).toBeUndefined()
+    expect(parsed.agents).toBeUndefined()
+  })
+  it('without makeDefault leaves the user provider and models alone', () => {
+    const out = ok(ZAI_CFG, false)
+    expect(codexDefaultProvider(out)).toBe('ZAI')
+    expect((TOML.parse(out) as any).review_model).toBe('glm-5.3')
+  })
+  it('re-applying is byte-identical', () => {
+    const once = ok(ZAI_CFG, true)
+    expect(ok(once, true)).toBe(once)
+  })
+  it('codexDefaultProvider reads the top-level key', () => {
+    expect(codexDefaultProvider(undefined)).toBeUndefined()
+    expect(codexDefaultProvider('model = "x"\n')).toBeUndefined()
+    expect(codexDefaultProvider(ok('', true))).toBe('llm-proxy')
   })
 })
