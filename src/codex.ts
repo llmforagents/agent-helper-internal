@@ -77,7 +77,87 @@ function setTopLevelKey(text: string, key: string, value: string): string {
   return `${keys}${keys === '' ? '' : '\n'}${line}\n${tail === '' ? '' : `\n${tail.trimStart()}`}`
 }
 
-export type CodexOptions = Readonly<{ makeDefault: boolean }>
+export type CodexOptions = Readonly<{
+  makeDefault: boolean
+  /** Set `model_catalog_json` to this path (only used when the user has none yet). */
+  catalogPath?: string
+}>
+
+const CATALOG_CONTEXT_WINDOW = 200_000
+/** Lower sorts first in `/model`: the default tier leads. */
+const PRIORITY: Record<Tier, number> = { normal: 0, high: 1, fast: 2 }
+
+/**
+ * Catalog entry for one tier, so `/model` lists it and Codex has real metadata instead of the fallback.
+ * `apply_patch_tool_type` is deliberately omitted: Codex only accepts "freeform" there (a custom tool the gateway's
+ * Responses translation does not carry; "function" makes Codex refuse the whole catalog), and without it the model
+ * edits files through the regular shell tools, which do work through the gateway.
+ */
+export function catalogEntry(tier: Tier): Record<string, unknown> {
+  const labels: Record<Tier, string> = {
+    high: 'llm-proxy high: hardest tasks (opus-class)',
+    normal: 'llm-proxy normal: everyday coding (sonnet-class, default)',
+    fast: 'llm-proxy fast: quick edits, search and routine work (haiku-class)',
+  }
+  return {
+    slug: TIER_MODEL[tier],
+    display_name: TIER_MODEL[tier],
+    description: labels[tier],
+    default_reasoning_level: 'medium',
+    supported_reasoning_levels: [
+      { effort: 'low', description: 'Light reasoning' },
+      { effort: 'medium', description: 'Balanced reasoning' },
+      { effort: 'high', description: 'Enhanced reasoning' },
+    ],
+    shell_type: 'shell_command',
+    visibility: 'list',
+    supported_in_api: true,
+    priority: PRIORITY[tier],
+    base_instructions: '',
+    supports_reasoning_summaries: false,
+    default_reasoning_summary: 'none',
+    support_verbosity: false,
+    truncation_policy: { mode: 'bytes', limit: 10000 },
+    context_window: CATALOG_CONTEXT_WINDOW,
+    max_context_window: CATALOG_CONTEXT_WINDOW,
+    effective_context_window_percent: 95,
+    supports_parallel_tool_calls: true,
+    experimental_supported_tools: [],
+    input_modalities: ['text'],
+  }
+}
+
+const CatalogSchema = z.object({ models: z.array(z.record(z.string(), z.unknown())) }).passthrough()
+
+/** Pure: adds/refreshes the three tier entries in a model catalog, keeping every other entry untouched. */
+export function mergeCatalog(text: string | undefined): Result<string, EditError> {
+  let json: unknown = { models: [] }
+  if (text !== undefined && text.trim() !== '') {
+    try {
+      json = JSON.parse(text)
+    } catch (e) {
+      return Err({ kind: 'unparseable', detail: e instanceof Error ? e.message : 'invalid JSON' })
+    }
+  }
+  const parsed = CatalogSchema.safeParse(json)
+  if (!parsed.success) return Err({ kind: 'unparseable', detail: 'model catalog must be {"models": [...]}' })
+  const ours = TIERS.map(catalogEntry)
+  const slugs = new Set(ours.map((e) => e['slug']))
+  const others = parsed.data.models.filter((m) => !slugs.has(m['slug']))
+  return Ok(JSON.stringify({ ...parsed.data, models: [...ours, ...others] }, null, 2) + '\n')
+}
+
+/** Where the model catalog lives: the user's own `model_catalog_json` (with `~` expanded) or undefined. */
+export function declaredCatalogPath(configText: string | undefined, codexHome: string, home: string): string | undefined {
+  if (configText === undefined) return undefined
+  const parsed = parseToml(configText)
+  const value = parsed.ok ? parsed.value['model_catalog_json'] : undefined
+  if (typeof value !== 'string' || value === '') return undefined
+  if (value === '~' || value.startsWith('~/')) return path.join(home, value.slice(1))
+  return path.isAbsolute(value) ? value : path.join(codexHome, value)
+}
+
+export const defaultCatalogPath = (codexHome: string): string => path.join(codexHome, 'llm-proxy-models.json')
 
 const REVIEW_MODEL_LINE = /^review_model\s*=.*$/m
 const SUBAGENT_MODEL_LINE = /^default_subagent_model\s*=.*$/m
@@ -120,6 +200,7 @@ export function applyCodexConfig(text: string, cfg: GatewayConfig, opts: CodexOp
     next = setTopLevelKey(next, 'model', TIER_MODEL.normal)
     next = setTopLevelKey(next, 'model_provider', PROVIDER_ID)
     next = remapDependentModels(next)
+    if (opts.catalogPath !== undefined) next = setTopLevelKey(next, 'model_catalog_json', opts.catalogPath)
   }
   const verify = parseToml(next)
   return verify.ok ? Ok(next) : verify

@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util'
 import { z } from 'zod'
 import { restoreBackup, writeWithBackup, type FsPort, type PlannedFile } from './backup.js'
 import { applyClaudeSettings, detectClaude } from './claude.js'
-import { applyCodexConfig, canWriteProfile, codexDefaultProvider, detectCodex, profileContent, profileName, profilePath } from './codex.js'
+import { applyCodexConfig, canWriteProfile, codexDefaultProvider, declaredCatalogPath, defaultCatalogPath, detectCodex, mergeCatalog, profileContent, profileName, profilePath } from './codex.js'
 import {
   API_KEY_ENV_VAR, ApiKey, BaseUrl, DEFAULT_BASE_URL, Err, Ok, PROVIDER_ID, TIERS, TIER_MODEL, TOOLS, assertNever, redactKey,
   type GatewayConfig, type Result, type Tool, type ToolStatus,
@@ -126,9 +126,21 @@ async function planClaude(cfg: GatewayConfig, deps: Deps): Promise<Planned> {
 
 async function planCodex(cfg: GatewayConfig, flags: Readonly<{ makeDefault: boolean; persistKey: boolean }>, deps: Deps): Promise<Planned> {
   const target = targetPath('codex', deps)
-  const next = applyCodexConfig((await deps.fs.read(target)) ?? '', cfg, { makeDefault: flags.makeDefault })
+  const current = (await deps.fs.read(target)) ?? ''
+  // Keep the user's own catalog when they have one; otherwise create ours, but only when the gateway becomes the default.
+  const declared = declaredCatalogPath(current, codexHome(deps), deps.home)
+  const catalogPath = declared ?? (flags.makeDefault ? defaultCatalogPath(codexHome(deps)) : undefined)
+  const next = applyCodexConfig(current, cfg, {
+    makeDefault: flags.makeDefault,
+    ...(declared === undefined && catalogPath !== undefined ? { catalogPath } : {}),
+  })
   if (!next.ok) return Err(`cannot edit ${target}: ${next.error.kind} (${next.error.detail})`)
   const files: PlannedFile[] = [{ target, content: next.value }]
+  if (catalogPath !== undefined) {
+    const catalog = mergeCatalog(await deps.fs.read(catalogPath))
+    if (!catalog.ok) return Err(`cannot edit ${catalogPath}: ${catalog.error.kind} (${catalog.error.detail})`)
+    files.push({ target: catalogPath, content: catalog.value })
+  }
   for (const tier of TIERS) {
     const file = profilePath(codexHome(deps), tier)
     if (!canWriteProfile(await deps.fs.read(file))) return Err(`${file} exists and was not written by this tool; move it away first`)

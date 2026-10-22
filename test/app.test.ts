@@ -244,4 +244,35 @@ describe('run', () => {
       expect(s.out.join('\n')).toContain('your default is unchanged')
     })
   })
+
+  describe('Codex model catalog', () => {
+    const CFG = '/home/u/.codex/config.toml'
+    it("merges the tiers into the user's own catalog and restore brings it back", async () => {
+      const catalog = JSON.stringify({ models: [{ slug: 'glm-5.3' }] })
+      const s = setup({ [CFG]: 'model_catalog_json = "~/.codex/models.json"\n', '/home/u/.codex/models.json': catalog })
+      expect(await run(['apply', 'codex', '--api-key', KEY], s.deps)).toBe(0)
+      const slugs = (JSON.parse(s.fs.files.get('/home/u/.codex/models.json') ?? '{}') as { models: { slug: string }[] }).models.map((m) => m.slug)
+      expect(slugs).toEqual(['auto/high', 'auto/normal', 'auto/fast', 'glm-5.3'])
+      expect(await run(['restore', 'codex'], s.deps)).toBe(0)
+      expect(s.fs.files.get('/home/u/.codex/models.json')).toBe(catalog)
+    })
+    it('creates and points to its own catalog when the user has none (default mode)', async () => {
+      const s = setup()
+      await run(['apply', 'codex', '--api-key', KEY], s.deps)
+      expect(s.fs.files.get(CFG)).toContain('model_catalog_json = "/home/u/.codex/llm-proxy-models.json"')
+      expect(s.fs.files.has('/home/u/.codex/llm-proxy-models.json')).toBe(true)
+      await run(['restore', 'codex'], s.deps)
+      expect(s.fs.files.has('/home/u/.codex/llm-proxy-models.json')).toBe(false)
+    })
+    it('--no-default without a user catalog does not create one', async () => {
+      const s = setup()
+      await run(['apply', 'codex', '--api-key', KEY, '--no-default'], s.deps)
+      expect(s.fs.files.has('/home/u/.codex/llm-proxy-models.json')).toBe(false)
+    })
+    it('refuses to touch a user catalog it cannot parse', async () => {
+      const s = setup({ [CFG]: 'model_catalog_json = "/m.json"\n', '/m.json': 'garbage' })
+      expect(await run(['apply', 'codex', '--api-key', KEY], s.deps)).toBe(1)
+      expect(s.fs.files.get('/m.json')).toBe('garbage')
+    })
+  })
 })

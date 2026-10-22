@@ -19,7 +19,7 @@ In a terminal it asks for your API key (input hidden) and, for Codex, whether to
 `~/.config/agent-helper-internal/env` (mode 0600) and source it from your shell rc, because Codex reads the key
 from `$LLM_PROXY_API_KEY` at runtime. Open a new shell afterwards.
 
-Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.2 ...`.
+Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.3 ...`.
 Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then use `agent-helper-internal` directly.
 
 ## Use
@@ -44,7 +44,8 @@ Run `npx @llmforagents/agent-helper-internal doctor`. The usual causes:
 
 - **`Missing environment variable: LLM_PROXY_API_KEY`**: the terminal was opened before the key was stored. Open a new terminal or run `. ~/.config/agent-helper-internal/env`.
 - **`/status` in Codex still shows another provider**: restart the Codex session after applying. `apply` makes plain `codex` use `auto/normal` (it also remaps `review_model` / `default_subagent_model` if you had set them). Use `codex -p llm-high|llm-fast` for the other tiers, and `--no-default` if you want to keep your current default. Custom agent role files under `~/.codex/agents/` keep their own `model`; point them at `auto/high` / `auto/fast` if you use them.
-- **"Model metadata for `auto/normal` not found"**: a harmless warning; Codex falls back to generic model metadata.
+- **`/model` only lists other models** (e.g. `glm-*`): your `model_catalog_json` did not have the tiers. `apply` adds `auto/high|normal|fast` to it (or creates `~/.codex/llm-proxy-models.json`), which also removes the "Model metadata for `auto/normal` not found" warning. Restart Codex afterwards.
+- **Editing files in Codex**: the tier entries leave `apply_patch_tool_type` unset on purpose (Codex only accepts `freeform`, which the gateway cannot carry), so the model edits files through the shell tool.
 
 ## Release (maintainers)
 

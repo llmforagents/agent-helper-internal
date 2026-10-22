@@ -1,6 +1,6 @@
 import TOML from '@iarna/toml'
 import { describe, expect, it } from 'vitest'
-import { applyCodexConfig, canWriteProfile, codexDefaultProvider, detectCodex, profileContent, profilePath } from '../src/codex.js'
+import { applyCodexConfig, canWriteProfile, catalogEntry, codexDefaultProvider, declaredCatalogPath, detectCodex, mergeCatalog, profileContent, profilePath } from '../src/codex.js'
 import { testConfig } from './helpers.js'
 
 const cfg = testConfig()
@@ -107,5 +107,47 @@ describe('default provider switch', () => {
     expect(codexDefaultProvider(undefined)).toBeUndefined()
     expect(codexDefaultProvider('model = "x"\n')).toBeUndefined()
     expect(codexDefaultProvider(ok('', true))).toBe('llm-proxy')
+  })
+})
+
+describe('model catalog', () => {
+  const USER_CATALOG = JSON.stringify({ models: [{ slug: 'glm-5.3', display_name: 'glm-5.3', priority: 0 }, { slug: 'glm-5.3-flash', priority: 1 }] })
+  const slugs = (text: string): string[] => (JSON.parse(text) as { models: { slug: string }[] }).models.map((m) => m.slug)
+
+  it('adds the three tiers and keeps the user entries untouched', () => {
+    const r = mergeCatalog(USER_CATALOG)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(slugs(r.value)).toEqual(['auto/high', 'auto/normal', 'auto/fast', 'glm-5.3', 'glm-5.3-flash'])
+    expect((JSON.parse(r.value) as { models: { slug: string; priority: number }[] }).models.find((m) => m.slug === 'glm-5.3')?.priority).toBe(0)
+  })
+  it('creates a catalog from nothing and is idempotent', () => {
+    const once = mergeCatalog(undefined)
+    if (!once.ok) throw new Error('unexpected')
+    expect(slugs(once.value)).toHaveLength(3)
+    const twice = mergeCatalog(once.value)
+    expect(twice.ok && twice.value).toBe(once.value)
+  })
+  it('rejects a catalog that is not {"models": [...]} instead of overwriting it', () => {
+    expect(mergeCatalog('{"nope":1}').ok).toBe(false)
+    expect(mergeCatalog('not json').ok).toBe(false)
+  })
+  it('omits apply_patch_tool_type: Codex rejects any value but "freeform", and freeform cannot cross the gateway', () => {
+    for (const tier of ['high', 'normal', 'fast'] as const) {
+      expect('apply_patch_tool_type' in catalogEntry(tier)).toBe(false)
+      expect(catalogEntry(tier)['visibility']).toBe('list')
+    }
+  })
+  it('resolves the declared catalog path (~, absolute, relative) and ignores a missing one', () => {
+    expect(declaredCatalogPath('model_catalog_json = "~/.codex/models.json"\n', '/c', '/h')).toBe('/h/.codex/models.json')
+    expect(declaredCatalogPath('model_catalog_json = "/abs/m.json"\n', '/c', '/h')).toBe('/abs/m.json')
+    expect(declaredCatalogPath('model_catalog_json = "m.json"\n', '/c', '/h')).toBe('/c/m.json')
+    expect(declaredCatalogPath('model = "x"\n', '/c', '/h')).toBeUndefined()
+  })
+  it('applyCodexConfig sets model_catalog_json only when asked', () => {
+    const withIt = applyCodexConfig('', cfg, { makeDefault: true, catalogPath: '/c/llm-proxy-models.json' })
+    expect(withIt.ok && (TOML.parse(withIt.value) as any).model_catalog_json).toBe('/c/llm-proxy-models.json')
+    const without = applyCodexConfig('', cfg, { makeDefault: true })
+    expect(without.ok && (TOML.parse(without.value) as any).model_catalog_json).toBeUndefined()
   })
 })
