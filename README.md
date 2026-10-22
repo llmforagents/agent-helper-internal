@@ -19,7 +19,7 @@ In a terminal it asks for your API key (input hidden) and, for Codex, whether to
 `~/.config/agent-helper-internal/env` (mode 0600) and source it from your shell rc, because Codex reads the key
 from `$LLM_PROXY_API_KEY` at runtime. Open a new shell afterwards.
 
-Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.1 ...`.
+Requires Node >= 20. `npx` always fetches the latest version; pin one with `npx @llmforagents/agent-helper-internal@0.1.2 ...`.
 Prefer a permanent command? `npm i -g @llmforagents/agent-helper-internal`, then use `agent-helper-internal` directly.
 
 ## Use
