@@ -193,7 +193,7 @@ async function applyOne(tool: Tool, cfg: GatewayConfig, flags: ApplyFlags, deps:
       ? '  key stored; open a new shell (or `source` your rc file) so Codex sees it'
       : `  export ${API_KEY_ENV_VAR}=<your key>   # Codex reads the key from the environment`)
     deps.out(flags.makeDefault
-      ? `  plain \`codex\` now uses ${TIER_MODEL.normal} via the gateway (restart open Codex sessions); tiers: codex -p ${profileName('high')} | ${profileName('fast')}`
+      ? `  plain \`codex\` now uses ${TIER_MODEL.normal} via the gateway (restart open Codex sessions); tiers: codex -p ${profileName('high')} | ${profileName('fast')}\n  if /model still lists old models: Codex's background server caches them; run \`codex app-server daemon restart\` (it interrupts running Codex sessions)`
       : `  your default is unchanged; run: codex -p ${profileName('high')} | ${profileName('normal')} | ${profileName('fast')}`)
   } else {
     deps.out('  restart open Claude Code sessions to pick up the new env')
